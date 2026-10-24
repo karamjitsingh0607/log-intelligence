@@ -1,6 +1,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
-
+from datetime import datetime, timezone
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_db
@@ -8,18 +9,32 @@ from app.main import app
 from app.services import log_ingestion
 
 
-async def override_get_db():
-    db = MagicMock()
-    db.add = MagicMock()
-    db.commit = AsyncMock()
-    yield db
+@pytest.fixture
+def client():
+    
+    async def override_get_db():
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+
+        def add_job(job):
+            if job.created_at is None:
+                job.created_at = datetime.now(timezone.utc)
+
+        db.add.side_effect = add_job
+
+        yield db
 
 
-app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+    app.dependency_overrides.pop(get_db, None)
 
 
-def test_upload_valid_log(tmp_path, monkeypatch):
+def test_upload_valid_log(tmp_path, monkeypatch, client):
     monkeypatch.setattr(log_ingestion, "UPLOAD_DIR", tmp_path)
 
     response = client.post(
@@ -45,7 +60,7 @@ def test_upload_valid_log(tmp_path, monkeypatch):
     assert (tmp_path / f'{data["job_id"]}.log').exists()
 
 
-def test_reject_unsupported_extension():
+def test_reject_unsupported_extension(client):
     response = client.post(
         "/api/v1/logs/upload",
         files={"file": ("sample.csv", b"a,b\n1,2", "text/csv")},
@@ -54,7 +69,7 @@ def test_reject_unsupported_extension():
     assert response.status_code == 400
 
 
-def test_reject_empty_file():
+def test_reject_empty_file(client):
     response = client.post(
         "/api/v1/logs/upload",
         files={"file": ("empty.log", b"", "text/plain")},
@@ -63,7 +78,7 @@ def test_reject_empty_file():
     assert response.status_code == 400
 
 
-def test_reject_oversized_file():
+def test_reject_oversized_file(client):
     response = client.post(
         "/api/v1/logs/upload",
         files={

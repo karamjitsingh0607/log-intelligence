@@ -1,9 +1,11 @@
-
-from unittest.mock import AsyncMock, MagicMock
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
+
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import logs
 from app.db import get_db
 from app.main import app
 from app.services import log_ingestion
@@ -16,6 +18,7 @@ def client():
         db = MagicMock()
         db.add = MagicMock()
         db.commit = AsyncMock()
+        db.refresh = AsyncMock()
 
         def add_job(job):
             if job.created_at is None:
@@ -34,8 +37,16 @@ def client():
     app.dependency_overrides.pop(get_db, None)
 
 
+
 def test_upload_valid_log(tmp_path, monkeypatch, client):
     monkeypatch.setattr(log_ingestion, "UPLOAD_DIR", tmp_path)
+
+    mock_process = AsyncMock()
+    monkeypatch.setattr(
+        logs,
+        "process_job_in_background",
+        mock_process,
+    )
 
     response = client.post(
         "/api/v1/logs/upload",
@@ -58,6 +69,8 @@ def test_upload_valid_log(tmp_path, monkeypatch, client):
         b"INFO Application started\nERROR Database timeout\n"
     )
     assert (tmp_path / f'{data["job_id"]}.log').exists()
+
+    mock_process.assert_awaited_once_with(UUID(data["job_id"]))
 
 
 def test_reject_unsupported_extension(client):

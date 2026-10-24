@@ -1,13 +1,12 @@
-
-from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.models import AnalysisJob
 from app.schemas.log import LogUploadResponse
+from app.services.job_processor import process_job
 from app.services.log_ingestion import save_log_file
 
 router = APIRouter(
@@ -16,12 +15,18 @@ router = APIRouter(
 )
 
 
+async def process_job_in_background(job_id):
+    async with SessionLocal() as db:
+        await process_job(job_id, db)
+
+
 @router.post(
     "/upload",
     response_model=LogUploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_log(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
@@ -44,6 +49,12 @@ async def upload_log(
 
     db.add(job)
     await db.commit()
+    await db.refresh(job)
+
+    background_tasks.add_task(
+        process_job_in_background,
+        job_id,
+    )
 
     return LogUploadResponse(
         job_id=job.id,

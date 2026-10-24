@@ -2,6 +2,8 @@
 from pathlib import Path
 from uuid import UUID
 
+import logging
+
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +13,7 @@ from app.services.log_parser import parse_log
 
 
 MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 async def process_job(
@@ -77,9 +80,30 @@ async def process_job(
         job.status = "completed"
         job.error_message = None
 
-    except Exception as exc:
+    except FileNotFoundError:
+        job.status = "failed"
+        job.error_message = "Uploaded log file was not found."
+        job.analysis_result = None
+
+    except UnicodeDecodeError:
+        job.status = "failed"
+        job.error_message = "Log file must contain valid UTF-8 text."
+        job.analysis_result = None
+
+    except ValueError as exc:
         job.status = "failed"
         job.error_message = str(exc)[:1000]
+        job.analysis_result = None
+
+    except Exception:
+        logger.exception(
+            "Unexpected error processing log job %s",
+            job_id,
+        )
+        job.status = "failed"
+        job.error_message = (
+            "Log processing failed due to an internal error."
+        )
         job.analysis_result = None
 
     try:

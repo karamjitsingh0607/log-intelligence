@@ -1,4 +1,4 @@
-
+from unittest.mock import patch
 import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
@@ -158,4 +158,157 @@ def test_process_job_rolls_back_when_final_commit_fails(
 
     assert db.commit_count == 2
     assert db.rollback_count == 1
+    assert db.refresh_count == 0
+
+
+
+def test_process_job_empty_file_fails(tmp_path, monkeypatch):
+    job_id = uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        filename="empty.log",
+        status="queued",
+        error_message=None,
+        analysis_result=None,
+    )
+
+    (tmp_path / f"{job_id}.log").write_text(
+        "",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(job_processor, "UPLOAD_DIR", tmp_path)
+    db = FakeDB(job)
+
+    result = asyncio.run(job_processor.process_job(job_id, db))
+
+    assert result.status == "failed"
+    assert result.error_message == "Log file is empty."
+    assert result.analysis_result is None
+    assert db.commit_count == 2
+    assert db.refresh_count == 1
+
+
+def test_process_job_oversized_file_fails(tmp_path, monkeypatch):
+    job_id = uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        filename="large.log",
+        status="queued",
+        error_message=None,
+        analysis_result=None,
+    )
+
+    oversized_content = b"x" * (
+        job_processor.MAX_LOG_SIZE_BYTES + 1
+    )
+
+    (tmp_path / f"{job_id}.log").write_bytes(oversized_content)
+
+    monkeypatch.setattr(job_processor, "UPLOAD_DIR", tmp_path)
+    db = FakeDB(job)
+
+    result = asyncio.run(job_processor.process_job(job_id, db))
+
+    assert result.status == "failed"
+    assert result.error_message == (
+        "Log file exceeds the maximum supported size."
+    )
+    assert result.analysis_result is None
+    assert db.commit_count == 2
+    assert db.refresh_count == 1
+
+
+def test_process_job_invalid_utf8_fails(tmp_path, monkeypatch):
+    job_id = uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        filename="invalid.log",
+        status="queued",
+        error_message=None,
+        analysis_result=None,
+    )
+
+    (tmp_path / f"{job_id}.log").write_bytes(
+        b"INFO Application started\n\xff\xfe\n"
+    )
+
+    monkeypatch.setattr(job_processor, "UPLOAD_DIR", tmp_path)
+    db = FakeDB(job)
+
+    result = asyncio.run(job_processor.process_job(job_id, db))
+
+    assert result.status == "failed"
+    assert result.error_message is not None
+    assert result.error_message == (
+        "Log file must contain valid UTF-8 text."
+    )
+    assert result.analysis_result is None
+    assert db.commit_count == 2
+    assert db.refresh_count == 1
+
+
+def test_process_job_unexpected_parser_error_is_hidden(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    job_id = uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        filename="sample.log",
+        status="queued",
+        error_message=None,
+        analysis_result=None,
+    )
+
+    (tmp_path / f"{job_id}.log").write_text(
+        "INFO Application started\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(job_processor, "UPLOAD_DIR", tmp_path)
+    db = FakeDB(job)
+
+    with patch(
+        "app.services.job_processor.parse_log",
+        side_effect=RuntimeError("Sensitive internal detail"),
+    ):
+        result = asyncio.run(
+            job_processor.process_job(job_id, db)
+        )
+
+    assert result.status == "failed"
+    assert result.error_message == (
+        "Log processing failed due to an internal error."
+    )
+    assert "Sensitive internal detail" not in result.error_message
+    assert "Sensitive internal detail" in caplog.text
+    assert result.analysis_result is None
+    assert db.commit_count == 2
+    assert db.refresh_count == 1
+
+
+
+def test_process_job_does_not_reprocess_completed_job():
+    job_id = uuid4()
+    existing_analysis = {"total_lines": 5}
+
+    job = SimpleNamespace(
+        id=job_id,
+        filename="sample.log",
+        status="completed",
+        error_message=None,
+        analysis_result=existing_analysis,
+    )
+
+    db = FakeDB(job)
+
+    result = asyncio.run(job_processor.process_job(job_id, db))
+
+    assert result is job
+    assert result.status == "completed"
+    assert result.analysis_result is existing_analysis
+    assert db.rollback_count == 1
+    assert db.commit_count == 0
     assert db.refresh_count == 0

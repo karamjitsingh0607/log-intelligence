@@ -1,10 +1,21 @@
 
+from unittest.mock import AsyncMock, MagicMock
+
 from fastapi.testclient import TestClient
 
+from app.db import get_db
 from app.main import app
 from app.services import log_ingestion
 
 
+async def override_get_db():
+    db = MagicMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    yield db
+
+
+app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
 
 
